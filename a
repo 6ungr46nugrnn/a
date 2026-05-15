@@ -1,0 +1,257 @@
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+while not player do
+    task.wait(0.1)
+    player = Players.LocalPlayer
+end
+
+local function getCharacterRoot()
+    local character = player.Character or player.CharacterAdded:Wait()
+    local root = character:FindFirstChild("HumanoidRootPart")
+    while not root do
+        task.wait(0.1)
+        character = player.Character or player.CharacterAdded:Wait()
+        root = character:FindFirstChild("HumanoidRootPart")
+    end
+    return character, root
+end
+
+local function trimText(value)
+    return tostring(value or ""):gsub("<.->", ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function readGuiText(instance)
+    if not instance then
+        return ""
+    end
+
+    local okContent, contentText = pcall(function()
+        return instance.ContentText
+    end)
+    if okContent and contentText and tostring(contentText) ~= "" then
+        return trimText(contentText)
+    end
+
+    local okText, text = pcall(function()
+        return instance.Text
+    end)
+    if okText and text then
+        return trimText(text)
+    end
+
+    return ""
+end
+
+local function safeFullName(instance)
+    local ok, fullName = pcall(function()
+        return instance:GetFullName()
+    end)
+    if ok then
+        return fullName
+    end
+    return instance.Name
+end
+
+local function isTextNode(instance)
+    return instance:IsA("TextLabel") or instance:IsA("TextButton") or instance:IsA("TextBox")
+end
+
+local function looksLikePetName(text)
+    local cleaned = trimText(text)
+    if cleaned == "" then
+        return false
+    end
+
+    local lowered = cleaned:lower()
+    local blocked = {
+        ["rare"] = true,
+        ["epic"] = true,
+        ["legendary"] = true,
+        ["mythic"] = true,
+        ["common"] = true,
+        ["pickup"] = true,
+        ["equip"] = true,
+        ["unequip"] = true,
+        ["claim"] = true,
+        ["sell"] = true,
+        ["open"] = true,
+    }
+
+    if blocked[lowered] then
+        return false
+    end
+    if cleaned:match("^%$") then
+        return false
+    end
+    if cleaned:match("^x%d") or cleaned:match("^%d") then
+        return false
+    end
+    if not cleaned:match("%a") then
+        return false
+    end
+
+    return true
+end
+
+local function getWorldPosition(instance)
+    if not instance then
+        return nil
+    end
+
+    if instance:IsA("BasePart") then
+        return instance.Position
+    end
+
+    local adorneeGui = instance:FindFirstAncestorWhichIsA("BillboardGui") or instance:FindFirstAncestorWhichIsA("SurfaceGui")
+    if adorneeGui and adorneeGui.Adornee and adorneeGui.Adornee:IsA("BasePart") then
+        return adorneeGui.Adornee.Position
+    end
+
+    local ancestorPart = instance:FindFirstAncestorWhichIsA("BasePart")
+    if ancestorPart then
+        return ancestorPart.Position
+    end
+
+    local ancestorModel = instance:FindFirstAncestorWhichIsA("Model")
+    if ancestorModel then
+        local ok, pivot = pcall(function()
+            return ancestorModel:GetPivot()
+        end)
+        if ok then
+            return pivot.Position
+        end
+
+        local modelPart = ancestorModel.PrimaryPart or ancestorModel:FindFirstChildWhichIsA("BasePart", true)
+        if modelPart then
+            return modelPart.Position
+        end
+    end
+
+    return nil
+end
+
+local function getCandidateRoot(instance)
+    local model = instance:FindFirstAncestorWhichIsA("Model")
+    if model then
+        return model
+    end
+
+    local folder = instance:FindFirstAncestorWhichIsA("Folder")
+    if folder then
+        return folder
+    end
+
+    return instance.Parent
+end
+
+local function addUnique(list, seen, value)
+    local cleaned = trimText(value)
+    if cleaned == "" or seen[cleaned] then
+        return
+    end
+    seen[cleaned] = true
+    list[#list + 1] = cleaned
+end
+
+local _, root = getCharacterRoot()
+task.wait(2)
+
+local scanRadius = 80
+local candidates = {}
+
+for _, descendant in ipairs(Workspace:GetDescendants()) do
+    if isTextNode(descendant) then
+        local text = readGuiText(descendant)
+        if text ~= "" then
+            local worldPosition = getWorldPosition(descendant)
+            if worldPosition and (worldPosition - root.Position).Magnitude <= scanRadius then
+                local candidateRoot = getCandidateRoot(descendant)
+                if candidateRoot then
+                    local key = candidateRoot
+                    local entry = candidates[key]
+                    if not entry then
+                        entry = {
+                            root = candidateRoot,
+                            distance = (worldPosition - root.Position).Magnitude,
+                            names = {},
+                            namesSeen = {},
+                            allTexts = {},
+                            allTextsSeen = {},
+                            sourceNodes = {},
+                            sourceSeen = {},
+                            position = worldPosition,
+                        }
+                        candidates[key] = entry
+                    end
+
+                    if entry.distance > (worldPosition - root.Position).Magnitude then
+                        entry.distance = (worldPosition - root.Position).Magnitude
+                        entry.position = worldPosition
+                    end
+
+                    addUnique(entry.allTexts, entry.allTextsSeen, text)
+                    if looksLikePetName(text) then
+                        addUnique(entry.names, entry.namesSeen, text)
+                    end
+
+                    local source = string.format("%s | path=%s", text, safeFullName(descendant))
+                    addUnique(entry.sourceNodes, entry.sourceSeen, source)
+                end
+            end
+        end
+    end
+end
+
+local results = {}
+for _, entry in pairs(candidates) do
+    if #entry.names > 0 or #entry.allTexts > 0 then
+        results[#results + 1] = entry
+    end
+end
+
+table.sort(results, function(a, b)
+    if #a.names == #b.names then
+        return a.distance < b.distance
+    end
+    return #a.names > #b.names
+end)
+
+local lines = {
+    "DawnTrack Nearby Pet Debug",
+    "player=" .. tostring(player.Name),
+    "scan_radius=" .. tostring(scanRadius),
+    "total_candidates=" .. tostring(#results),
+    "",
+}
+
+for index, entry in ipairs(results) do
+    if index > 40 then
+        break
+    end
+
+    lines[#lines + 1] = string.format("[%d] root=%s", index, safeFullName(entry.root))
+    lines[#lines + 1] = string.format("distance=%.2f", entry.distance)
+    lines[#lines + 1] = "pet_names=" .. (#entry.names > 0 and table.concat(entry.names, " | ") or "(none)")
+    lines[#lines + 1] = "all_texts=" .. (#entry.allTexts > 0 and table.concat(entry.allTexts, " | ") or "(none)")
+
+    local maxSources = math.min(6, #entry.sourceNodes)
+    for sourceIndex = 1, maxSources do
+        lines[#lines + 1] = "source=" .. entry.sourceNodes[sourceIndex]
+    end
+    lines[#lines + 1] = ""
+end
+
+if #results == 0 then
+    lines[#lines + 1] = "No nearby pet candidates found."
+end
+
+local output = table.concat(lines, "\n")
+if setclipboard then
+    setclipboard(output)
+elseif toclipboard then
+    toclipboard(output)
+end
+
+print(output)
