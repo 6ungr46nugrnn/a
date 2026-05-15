@@ -1,5 +1,6 @@
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
+local CoreGui = game:GetService("CoreGui")
 
 local player = Players.LocalPlayer
 while not player do
@@ -7,19 +8,12 @@ while not player do
     player = Players.LocalPlayer
 end
 
-local function getCharacterRoot()
-    local character = player.Character or player.CharacterAdded:Wait()
-    local root = character:FindFirstChild("HumanoidRootPart")
-    while not root do
-        task.wait(0.1)
-        character = player.Character or player.CharacterAdded:Wait()
-        root = character:FindFirstChild("HumanoidRootPart")
-    end
-    return character, root
-end
-
 local function trimText(value)
     return tostring(value or ""):gsub("<.->", ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function normalizeText(value)
+    return trimText(value):lower()
 end
 
 local function readGuiText(instance)
@@ -58,92 +52,25 @@ local function isTextNode(instance)
     return instance:IsA("TextLabel") or instance:IsA("TextButton") or instance:IsA("TextBox")
 end
 
-local function looksLikePetName(text)
-    local cleaned = trimText(text)
-    if cleaned == "" then
-        return false
+local function isVisibleGui(instance)
+    if not instance:IsA("GuiObject") then
+        return true
     end
-
-    local lowered = cleaned:lower()
-    local blocked = {
-        ["rare"] = true,
-        ["epic"] = true,
-        ["legendary"] = true,
-        ["mythic"] = true,
-        ["common"] = true,
-        ["pickup"] = true,
-        ["equip"] = true,
-        ["unequip"] = true,
-        ["claim"] = true,
-        ["sell"] = true,
-        ["open"] = true,
-    }
-
-    if blocked[lowered] then
-        return false
-    end
-    if cleaned:match("^%$") then
-        return false
-    end
-    if cleaned:match("^x%d") or cleaned:match("^%d") then
-        return false
-    end
-    if not cleaned:match("%a") then
-        return false
-    end
-
-    return true
+    local ok, visible = pcall(function()
+        return instance.Visible
+    end)
+    return not ok or visible
 end
 
-local function getWorldPosition(instance)
-    if not instance then
-        return nil
+local function getCharacterRoot()
+    local character = player.Character or player.CharacterAdded:Wait()
+    local root = character:FindFirstChild("HumanoidRootPart")
+    while not root do
+        task.wait(0.1)
+        character = player.Character or player.CharacterAdded:Wait()
+        root = character:FindFirstChild("HumanoidRootPart")
     end
-
-    if instance:IsA("BasePart") then
-        return instance.Position
-    end
-
-    local adorneeGui = instance:FindFirstAncestorWhichIsA("BillboardGui") or instance:FindFirstAncestorWhichIsA("SurfaceGui")
-    if adorneeGui and adorneeGui.Adornee and adorneeGui.Adornee:IsA("BasePart") then
-        return adorneeGui.Adornee.Position
-    end
-
-    local ancestorPart = instance:FindFirstAncestorWhichIsA("BasePart")
-    if ancestorPart then
-        return ancestorPart.Position
-    end
-
-    local ancestorModel = instance:FindFirstAncestorWhichIsA("Model")
-    if ancestorModel then
-        local ok, pivot = pcall(function()
-            return ancestorModel:GetPivot()
-        end)
-        if ok then
-            return pivot.Position
-        end
-
-        local modelPart = ancestorModel.PrimaryPart or ancestorModel:FindFirstChildWhichIsA("BasePart", true)
-        if modelPart then
-            return modelPart.Position
-        end
-    end
-
-    return nil
-end
-
-local function getCandidateRoot(instance)
-    local model = instance:FindFirstAncestorWhichIsA("Model")
-    if model then
-        return model
-    end
-
-    local folder = instance:FindFirstAncestorWhichIsA("Folder")
-    if folder then
-        return folder
-    end
-
-    return instance.Parent
+    return root
 end
 
 local function addUnique(list, seen, value)
@@ -155,96 +82,222 @@ local function addUnique(list, seen, value)
     list[#list + 1] = cleaned
 end
 
-local _, root = getCharacterRoot()
+local function addSource(list, seen, text, path)
+    local key = tostring(text) .. "|" .. tostring(path)
+    if seen[key] then
+        return
+    end
+    seen[key] = true
+    list[#list + 1] = string.format("%s | path=%s", tostring(text), tostring(path))
+end
+
+local function looksLikePetName(text)
+    local cleaned = trimText(text)
+    if cleaned == "" then
+        return false
+    end
+
+    local lowered = cleaned:lower()
+    if lowered == normalizeText(player.Name) or lowered == normalizeText(player.DisplayName) then
+        return false
+    end
+
+    local blockedExact = {
+        ["rare"] = true,
+        ["epic"] = true,
+        ["legendary"] = true,
+        ["mythic"] = true,
+        ["common"] = true,
+        ["pickup"] = true,
+        ["equip"] = true,
+        ["unequip"] = true,
+        ["claim"] = true,
+        ["sell"] = true,
+        ["open"] = true,
+        ["none"] = true,
+    }
+    if blockedExact[lowered] then
+        return false
+    end
+
+    if cleaned:match("^%$") or cleaned:match("^x%d") or cleaned:match("^%d") then
+        return false
+    end
+    if lowered:find("offline", 1, true) or lowered:find("multi", 1, true) then
+        return false
+    end
+    if lowered:find("lvl", 1, true) then
+        return false
+    end
+    if not cleaned:match("%a") then
+        return false
+    end
+
+    return true
+end
+
+local function findOwnedPlot()
+    local plots = Workspace:FindFirstChild("Plots")
+    if not plots then
+        return nil
+    end
+
+    local targets = {
+        [normalizeText(player.Name)] = true,
+        [normalizeText(player.DisplayName)] = true,
+    }
+
+    for _, plot in ipairs(plots:GetChildren()) do
+        for _, descendant in ipairs(plot:GetDescendants()) do
+            if isTextNode(descendant) then
+                local text = readGuiText(descendant)
+                if targets[normalizeText(text)] then
+                    return plot, descendant
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function getPlotScreenRect(plot)
+    local camera = Workspace.CurrentCamera
+    if not camera or not plot then
+        return nil
+    end
+
+    local minX, minY = math.huge, math.huge
+    local maxX, maxY = -math.huge, -math.huge
+    local visibleCount = 0
+
+    for _, descendant in ipairs(plot:GetDescendants()) do
+        if descendant:IsA("BasePart") then
+            local viewportPoint, onScreen = camera:WorldToViewportPoint(descendant.Position)
+            if onScreen and viewportPoint.Z > 0 then
+                visibleCount = visibleCount + 1
+                if viewportPoint.X < minX then minX = viewportPoint.X end
+                if viewportPoint.Y < minY then minY = viewportPoint.Y end
+                if viewportPoint.X > maxX then maxX = viewportPoint.X end
+                if viewportPoint.Y > maxY then maxY = viewportPoint.Y end
+            end
+        end
+    end
+
+    if visibleCount == 0 then
+        return nil
+    end
+
+    local marginX, marginY = 120, 80
+    return {
+        minX = minX - marginX,
+        minY = minY - marginY,
+        maxX = maxX + marginX,
+        maxY = maxY + marginY,
+        visibleCount = visibleCount,
+    }
+end
+
+local function pointInsideRect(x, y, rect)
+    return rect and x >= rect.minX and x <= rect.maxX and y >= rect.minY and y <= rect.maxY
+end
+
+local function getGuiCenter(instance)
+    if not instance:IsA("GuiObject") then
+        return nil, nil
+    end
+    local position = instance.AbsolutePosition
+    local size = instance.AbsoluteSize
+    return position.X + (size.X * 0.5), position.Y + (size.Y * 0.5)
+end
+
+local root = getCharacterRoot()
 task.wait(2)
 
-local scanRadius = 80
-local candidates = {}
+local ownedPlot, ownerLabel = findOwnedPlot()
+local plotRect = getPlotScreenRect(ownedPlot)
+local plotCandidates = {}
+local names, namesSeen = {}, {}
+local allTexts, allTextsSeen = {}, {}
+local sources, sourceSeen = {}, {}
 
-for _, descendant in ipairs(Workspace:GetDescendants()) do
-    if isTextNode(descendant) then
-        local text = readGuiText(descendant)
-        if text ~= "" then
-            local worldPosition = getWorldPosition(descendant)
-            if worldPosition and (worldPosition - root.Position).Magnitude <= scanRadius then
-                local candidateRoot = getCandidateRoot(descendant)
-                if candidateRoot then
-                    local key = candidateRoot
-                    local entry = candidates[key]
-                    if not entry then
-                        entry = {
-                            root = candidateRoot,
-                            distance = (worldPosition - root.Position).Magnitude,
-                            names = {},
-                            namesSeen = {},
-                            allTexts = {},
-                            allTextsSeen = {},
-                            sourceNodes = {},
-                            sourceSeen = {},
-                            position = worldPosition,
-                        }
-                        candidates[key] = entry
-                    end
+local function registerCandidate(text, path, bucket)
+    addUnique(allTexts, allTextsSeen, text)
+    addSource(sources, sourceSeen, text, path)
+    if looksLikePetName(text) then
+        addUnique(names, namesSeen, text)
+        if bucket then
+            plotCandidates[#plotCandidates + 1] = bucket
+        end
+    end
+end
 
-                    if entry.distance > (worldPosition - root.Position).Magnitude then
-                        entry.distance = (worldPosition - root.Position).Magnitude
-                        entry.position = worldPosition
-                    end
+if ownedPlot then
+    for _, descendant in ipairs(ownedPlot:GetDescendants()) do
+        if isTextNode(descendant) then
+            local text = readGuiText(descendant)
+            if text ~= "" and isVisibleGui(descendant) then
+                registerCandidate(text, safeFullName(descendant), {
+                    text = text,
+                    source = "Workspace",
+                    path = safeFullName(descendant),
+                })
+            end
+        end
+    end
+end
 
-                    addUnique(entry.allTexts, entry.allTextsSeen, text)
-                    if looksLikePetName(text) then
-                        addUnique(entry.names, entry.namesSeen, text)
-                    end
+local guiRoots = {}
+local playerGui = player:FindFirstChildOfClass("PlayerGui")
+if playerGui then
+    guiRoots[#guiRoots + 1] = { name = "PlayerGui", root = playerGui }
+end
+guiRoots[#guiRoots + 1] = { name = "CoreGui", root = CoreGui }
 
-                    local source = string.format("%s | path=%s", text, safeFullName(descendant))
-                    addUnique(entry.sourceNodes, entry.sourceSeen, source)
+for _, guiRoot in ipairs(guiRoots) do
+    for _, descendant in ipairs(guiRoot.root:GetDescendants()) do
+        if isTextNode(descendant) and isVisibleGui(descendant) then
+            local text = readGuiText(descendant)
+            if text ~= "" then
+                local centerX, centerY = getGuiCenter(descendant)
+                if centerX and centerY and pointInsideRect(centerX, centerY, plotRect) then
+                    registerCandidate(text, safeFullName(descendant), {
+                        text = text,
+                        source = guiRoot.name,
+                        path = safeFullName(descendant),
+                        x = centerX,
+                        y = centerY,
+                    })
                 end
             end
         end
     end
 end
 
-local results = {}
-for _, entry in pairs(candidates) do
-    if #entry.names > 0 or #entry.allTexts > 0 then
-        results[#results + 1] = entry
-    end
-end
-
-table.sort(results, function(a, b)
-    if #a.names == #b.names then
-        return a.distance < b.distance
-    end
-    return #a.names > #b.names
+table.sort(plotCandidates, function(a, b)
+    return tostring(a.text) < tostring(b.text)
 end)
 
 local lines = {
-    "DawnTrack Nearby Pet Debug",
+    "DawnTrack Owned Plot Pet Debug",
     "player=" .. tostring(player.Name),
-    "scan_radius=" .. tostring(scanRadius),
-    "total_candidates=" .. tostring(#results),
+    "character_pos=" .. string.format("%.2f,%.2f,%.2f", root.Position.X, root.Position.Y, root.Position.Z),
+    "owned_plot=" .. (ownedPlot and safeFullName(ownedPlot) or "(not found)"),
+    "owner_label=" .. (ownerLabel and safeFullName(ownerLabel) or "(not found)"),
+    "plot_rect=" .. (plotRect and string.format("%.1f,%.1f -> %.1f,%.1f", plotRect.minX, plotRect.minY, plotRect.maxX, plotRect.maxY) or "(not found)"),
+    "pet_name_count=" .. tostring(#names),
+    "",
+    "pet_names=" .. (#names > 0 and table.concat(names, " | ") or "(none)"),
     "",
 }
 
-for index, entry in ipairs(results) do
-    if index > 40 then
-        break
-    end
-
-    lines[#lines + 1] = string.format("[%d] root=%s", index, safeFullName(entry.root))
-    lines[#lines + 1] = string.format("distance=%.2f", entry.distance)
-    lines[#lines + 1] = "pet_names=" .. (#entry.names > 0 and table.concat(entry.names, " | ") or "(none)")
-    lines[#lines + 1] = "all_texts=" .. (#entry.allTexts > 0 and table.concat(entry.allTexts, " | ") or "(none)")
-
-    local maxSources = math.min(6, #entry.sourceNodes)
-    for sourceIndex = 1, maxSources do
-        lines[#lines + 1] = "source=" .. entry.sourceNodes[sourceIndex]
-    end
-    lines[#lines + 1] = ""
+local maxSources = math.min(40, #sources)
+for index = 1, maxSources do
+    lines[#lines + 1] = "source=" .. sources[index]
 end
 
-if #results == 0 then
-    lines[#lines + 1] = "No nearby pet candidates found."
+if #sources == 0 then
+    lines[#lines + 1] = "No candidate text found in owned plot area."
 end
 
 local output = table.concat(lines, "\n")
