@@ -1,0 +1,233 @@
+-- b
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+while not player do
+    task.wait(0.1)
+    player = Players.LocalPlayer
+end
+
+local function trimText(value)
+    return tostring(value or ""):gsub("<.->", ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function normalizeText(value)
+    return trimText(value):lower()
+end
+
+local function readGuiText(instance)
+    if not instance then
+        return ""
+    end
+
+    local okContent, contentText = pcall(function()
+        return instance.ContentText
+    end)
+    if okContent and contentText and tostring(contentText) ~= "" then
+        return trimText(contentText)
+    end
+
+    local okText, text = pcall(function()
+        return instance.Text
+    end)
+    if okText and text then
+        return trimText(text)
+    end
+
+    return ""
+end
+
+local function safeFullName(instance)
+    local ok, fullName = pcall(function()
+        return instance:GetFullName()
+    end)
+    if ok then
+        return fullName
+    end
+    return instance and instance.Name or "(nil)"
+end
+
+local function looksLikePetName(text)
+    local cleaned = trimText(text)
+    if cleaned == "" then
+        return false
+    end
+
+    local lowered = normalizeText(cleaned)
+    if lowered == normalizeText(player.Name) or lowered == normalizeText(player.DisplayName) then
+        return false
+    end
+
+    local blockedExact = {
+        ["rare"] = true,
+        ["epic"] = true,
+        ["legendary"] = true,
+        ["mythic"] = true,
+        ["common"] = true,
+        ["divine"] = true,
+        ["hacked"] = true,
+        ["og"] = true,
+        ["molten"] = true,
+        ["plasma"] = true,
+        ["none"] = true,
+    }
+    if blockedExact[lowered] then
+        return false
+    end
+
+    if cleaned:match("^%$") or cleaned:match("^x%d") or cleaned:match("^%d") then
+        return false
+    end
+    if lowered:find("offline", 1, true) or lowered:find("multi", 1, true) then
+        return false
+    end
+    if lowered:find("lvl", 1, true) then
+        return false
+    end
+    if not cleaned:match("%a") then
+        return false
+    end
+
+    return true
+end
+
+local function findOwnedPlot()
+    local plots = Workspace:FindFirstChild("Plots")
+    if not plots then
+        return nil
+    end
+
+    local targets = {
+        [normalizeText(player.Name)] = true,
+        [normalizeText(player.DisplayName)] = true,
+    }
+
+    for _, plot in ipairs(plots:GetChildren()) do
+        for _, descendant in ipairs(plot:GetDescendants()) do
+            local text = readGuiText(descendant)
+            if text ~= "" and targets[normalizeText(text)] then
+                return plot, descendant
+            end
+        end
+    end
+
+    return nil
+end
+
+local function isDescendantOf(instance, ancestor)
+    if not instance or not ancestor then
+        return false
+    end
+    local ok, result = pcall(function()
+        return instance:IsDescendantOf(ancestor)
+    end)
+    return ok and result
+end
+
+local function getSurfaceGuiEntries(surfaceGuisRoot, ownedPlot)
+    local entries = {}
+    if not surfaceGuisRoot or not ownedPlot then
+        return entries
+    end
+
+    for _, gui in ipairs(surfaceGuisRoot:GetDescendants()) do
+        if gui.Name == "EntityGUI" then
+            local frame = gui:FindFirstChild("Frame")
+            local nameLabel = frame and frame:FindFirstChild("NameLabel")
+            local petName = readGuiText(nameLabel)
+
+            if looksLikePetName(petName) then
+                local adornee = gui.Adornee
+                if adornee and isDescendantOf(adornee, ownedPlot) then
+                    local mutation = readGuiText(frame:FindFirstChild("MutationLabel"))
+                    local rarity = readGuiText(frame:FindFirstChild("RarityLabel"))
+                    local cpsFrame = frame:FindFirstChild("CPSFrame")
+                    local cps = readGuiText(cpsFrame and cpsFrame:FindFirstChild("Label"))
+
+                    entries[#entries + 1] = {
+                        name = petName,
+                        mutation = mutation,
+                        rarity = rarity,
+                        cps = cps,
+                        guiPath = safeFullName(gui),
+                        adorneePath = safeFullName(adornee),
+                    }
+                end
+            end
+        end
+    end
+
+    return entries
+end
+
+local function getFallbackEntries(ownedPlot)
+    local entries = {}
+    if not ownedPlot then
+        return entries
+    end
+
+    for _, descendant in ipairs(ownedPlot:GetDescendants()) do
+        local text = readGuiText(descendant)
+        if looksLikePetName(text) then
+            entries[#entries + 1] = {
+                name = text,
+                mutation = "",
+                rarity = "",
+                cps = "",
+                guiPath = safeFullName(descendant),
+                adorneePath = "(workspace-direct)",
+            }
+        end
+    end
+
+    return entries
+end
+
+task.wait(2)
+
+local ownedPlot, ownerLabel = findOwnedPlot()
+local playerGui = player:FindFirstChildOfClass("PlayerGui")
+local surfaceGuisRoot = playerGui and playerGui:FindFirstChild("SurfaceGUIs")
+local entries = getSurfaceGuiEntries(surfaceGuisRoot, ownedPlot)
+
+if #entries == 0 then
+    entries = getFallbackEntries(ownedPlot)
+end
+
+table.sort(entries, function(a, b)
+    return tostring(a.name) < tostring(b.name)
+end)
+
+local lines = {
+    "DawnTrack Owned Plot Pet Debug",
+    "player=" .. tostring(player.Name),
+    "owned_plot=" .. (ownedPlot and safeFullName(ownedPlot) or "(not found)"),
+    "owner_label=" .. (ownerLabel and safeFullName(ownerLabel) or "(not found)"),
+    "surface_guis_root=" .. (surfaceGuisRoot and safeFullName(surfaceGuisRoot) or "(not found)"),
+    "total_pets=" .. tostring(#entries),
+    "",
+}
+
+for index, entry in ipairs(entries) do
+    lines[#lines + 1] = string.format("[%d] name=%s", index, tostring(entry.name))
+    lines[#lines + 1] = "mutation=" .. (entry.mutation ~= "" and entry.mutation or "(none)")
+    lines[#lines + 1] = "rarity=" .. (entry.rarity ~= "" and entry.rarity or "(none)")
+    lines[#lines + 1] = "cps=" .. (entry.cps ~= "" and entry.cps or "(none)")
+    lines[#lines + 1] = "adornee=" .. tostring(entry.adorneePath)
+    lines[#lines + 1] = "gui=" .. tostring(entry.guiPath)
+    lines[#lines + 1] = ""
+end
+
+if #entries == 0 then
+    lines[#lines + 1] = "No owned-plot pet entities found."
+end
+
+local output = table.concat(lines, "\n")
+if setclipboard then
+    setclipboard(output)
+elseif toclipboard then
+    toclipboard(output)
+end
+
+print(output)
