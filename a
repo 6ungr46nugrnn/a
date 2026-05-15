@@ -1,0 +1,327 @@
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+
+local player = Players.LocalPlayer
+while not player do
+    task.wait(0.1)
+    player = Players.LocalPlayer
+end
+
+local function trimText(value)
+    return tostring(value or ""):gsub("<.->", ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function normalizeText(value)
+    return trimText(value):lower()
+end
+
+local function readGuiText(instance)
+    if not instance then
+        return ""
+    end
+
+    local okContent, contentText = pcall(function()
+        return instance.ContentText
+    end)
+    if okContent and contentText and tostring(contentText) ~= "" then
+        return trimText(contentText)
+    end
+
+    local okText, text = pcall(function()
+        return instance.Text
+    end)
+    if okText and text then
+        return trimText(text)
+    end
+
+    return ""
+end
+
+local function safeFullName(instance)
+    local ok, fullName = pcall(function()
+        return instance:GetFullName()
+    end)
+    if ok then
+        return fullName
+    end
+    return instance and instance.Name or "(nil)"
+end
+
+local function isTextNode(instance)
+    return instance:IsA("TextLabel") or instance:IsA("TextButton") or instance:IsA("TextBox")
+end
+
+local function isVisible(instance)
+    if not instance:IsA("GuiObject") then
+        return true
+    end
+    local ok, visible = pcall(function()
+        return instance.Visible
+    end)
+    return not ok or visible
+end
+
+local function getGuiCenter(instance)
+    if not instance:IsA("GuiObject") then
+        return nil, nil
+    end
+    local pos = instance.AbsolutePosition
+    local size = instance.AbsoluteSize
+    return pos.X + (size.X * 0.5), pos.Y + (size.Y * 0.5)
+end
+
+local function looksLikeRate(text)
+    local cleaned = trimText(text)
+    return cleaned:match("^%$[%d%.,]+[KMBTQ]?/s$") ~= nil
+end
+
+local function looksLikeRarity(text)
+    local rarity = {
+        common = true,
+        rare = true,
+        epic = true,
+        legendary = true,
+        mythic = true,
+        divine = true,
+        secret = true,
+        exclusive = true,
+    }
+    return rarity[normalizeText(text)] == true
+end
+
+local function looksLikePetName(text)
+    local cleaned = trimText(text)
+    if cleaned == "" then
+        return false
+    end
+
+    local lowered = normalizeText(cleaned)
+    if lowered == normalizeText(player.Name) or lowered == normalizeText(player.DisplayName) then
+        return false
+    end
+
+    local blockedExact = {
+        ["inventory"] = true,
+        ["inv"] = true,
+        ["pets"] = true,
+        ["brainrots"] = true,
+        ["equip"] = true,
+        ["unequip"] = true,
+        ["delete"] = true,
+        ["sell"] = true,
+        ["close"] = true,
+        ["search"] = true,
+        ["locked"] = true,
+        ["selected"] = true,
+        ["none"] = true,
+        ["new"] = true,
+        ["free"] = true,
+        ["best"] = true,
+        ["team"] = true,
+        ["regular"] = true,
+        ["event"] = true,
+        ["name"] = true,
+        ["title"] = true,
+        ["ok"] = true,
+        ["yes"] = true,
+        ["no"] = true,
+    }
+    if blockedExact[lowered] then
+        return false
+    end
+
+    if looksLikeRarity(cleaned) or looksLikeRate(cleaned) then
+        return false
+    end
+    if cleaned:match("^%$") or cleaned:match("^x%d") or cleaned:match("^%d") then
+        return false
+    end
+    if lowered:find("slot", 1, true) or lowered:find("power", 1, true) or lowered:find("speed", 1, true) then
+        return false
+    end
+    if lowered:find("inventory", 1, true) or lowered:find("rebirth", 1, true) or lowered:find("weather", 1, true) then
+        return false
+    end
+    if not cleaned:match("%a") then
+        return false
+    end
+
+    return true
+end
+
+local function findInventoryRoots(root)
+    local results = {}
+    if not root then
+        return results
+    end
+
+    local seen = {}
+    for _, descendant in ipairs(root:GetDescendants()) do
+        if descendant:IsA("GuiObject") then
+            local fullName = safeFullName(descendant)
+            local loweredFullName = fullName:lower()
+            local loweredName = tostring(descendant.Name):lower()
+            if loweredName:find("inv", 1, true)
+                or loweredName:find("pet", 1, true)
+                or loweredName:find("brainrot", 1, true)
+                or loweredFullName:find("inventory", 1, true)
+                or loweredFullName:find("brainrot", 1, true)
+                or loweredFullName:find("surfaceguis", 1, true) then
+                if not seen[fullName] then
+                    seen[fullName] = true
+                    results[#results + 1] = descendant
+                end
+            end
+        end
+    end
+
+    return results
+end
+
+local function collectCardCandidates(root)
+    local cards = {}
+    if not root then
+        return cards
+    end
+
+    for _, descendant in ipairs(root:GetDescendants()) do
+        if descendant:IsA("GuiObject") and isVisible(descendant) then
+            local nameTexts, rateTexts, rarityTexts, allTexts = {}, {}, {}, {}
+            local namesSeen, ratesSeen, raritiesSeen, allSeen = {}, {}, {}, {}
+
+            for _, node in ipairs(descendant:GetDescendants()) do
+                if isTextNode(node) and isVisible(node) then
+                    local text = readGuiText(node)
+                    if text ~= "" then
+                        if not allSeen[text] then
+                            allSeen[text] = true
+                            allTexts[#allTexts + 1] = text
+                        end
+                        if looksLikePetName(text) and not namesSeen[text] then
+                            namesSeen[text] = true
+                            nameTexts[#nameTexts + 1] = text
+                        end
+                        if looksLikeRate(text) and not ratesSeen[text] then
+                            ratesSeen[text] = true
+                            rateTexts[#rateTexts + 1] = text
+                        end
+                        if looksLikeRarity(text) and not raritiesSeen[text] then
+                            raritiesSeen[text] = true
+                            rarityTexts[#rarityTexts + 1] = text
+                        end
+                    end
+                end
+            end
+
+            if #nameTexts > 0 and (#rateTexts > 0 or #rarityTexts > 0) then
+                local x, y = getGuiCenter(descendant)
+                cards[#cards + 1] = {
+                    root = descendant,
+                    names = nameTexts,
+                    rates = rateTexts,
+                    rarities = rarityTexts,
+                    allTexts = allTexts,
+                    x = x or 0,
+                    y = y or 0,
+                }
+            end
+        end
+    end
+
+    return cards
+end
+
+local function dedupeCards(cards)
+    local deduped = {}
+    local seen = {}
+
+    for _, card in ipairs(cards) do
+        local key = table.concat(card.names, "|") .. "||" .. table.concat(card.rates, "|") .. "||" .. table.concat(card.rarities, "|")
+        if not seen[key] then
+            seen[key] = true
+            deduped[#deduped + 1] = card
+        end
+    end
+
+    return deduped
+end
+
+task.wait(2)
+
+local playerGui = player:FindFirstChildOfClass("PlayerGui")
+local candidateRoots = {}
+local rootsSeen = {}
+
+local function addRoot(root)
+    if not root then
+        return
+    end
+    local key = safeFullName(root)
+    if rootsSeen[key] then
+        return
+    end
+    rootsSeen[key] = true
+    candidateRoots[#candidateRoots + 1] = root
+end
+
+for _, root in ipairs(findInventoryRoots(playerGui)) do
+    addRoot(root)
+end
+for _, root in ipairs(findInventoryRoots(CoreGui)) do
+    addRoot(root)
+end
+
+local allCards = {}
+for _, root in ipairs(candidateRoots) do
+    local cards = collectCardCandidates(root)
+    for _, card in ipairs(cards) do
+        allCards[#allCards + 1] = card
+    end
+end
+
+allCards = dedupeCards(allCards)
+table.sort(allCards, function(a, b)
+    if a.y == b.y then
+        return a.x < b.x
+    end
+    return a.y < b.y
+end)
+
+local lines = {
+    "DawnTrack Inventory Pet Debug",
+    "player=" .. tostring(player.Name),
+    "player_gui=" .. (playerGui and safeFullName(playerGui) or "(not found)"),
+    "candidate_roots=" .. tostring(#candidateRoots),
+    "total_cards=" .. tostring(#allCards),
+    "",
+}
+
+for index, root in ipairs(candidateRoots) do
+    lines[#lines + 1] = string.format("root[%d]=%s", index, safeFullName(root))
+end
+
+if #candidateRoots > 0 then
+    lines[#lines + 1] = ""
+end
+
+for index, card in ipairs(allCards) do
+    lines[#lines + 1] = string.format("[%d] root=%s", index, safeFullName(card.root))
+    lines[#lines + 1] = "name=" .. table.concat(card.names, " | ")
+    lines[#lines + 1] = "rate=" .. (#card.rates > 0 and table.concat(card.rates, " | ") or "(none)")
+    lines[#lines + 1] = "rarity=" .. (#card.rarities > 0 and table.concat(card.rarities, " | ") or "(none)")
+    lines[#lines + 1] = "texts=" .. table.concat(card.allTexts, " | ")
+    lines[#lines + 1] = ""
+end
+
+if #allCards == 0 then
+    lines[#lines + 1] = "No inventory pet cards found."
+end
+
+local output = table.concat(lines, "\n")
+if setclipboard then
+    setclipboard(output)
+elseif toclipboard then
+    toclipboard(output)
+end
+
+print(output)
