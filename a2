@@ -1,0 +1,430 @@
+local Players = game:GetService("Players")
+
+local player = Players.LocalPlayer
+while not player do
+    task.wait(0.1)
+    player = Players.LocalPlayer
+end
+
+local function trimText(value)
+    return tostring(value or ""):gsub("<.->", ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function normalizeText(value)
+    return trimText(value):lower()
+end
+
+local function readGuiText(instance)
+    if not instance then
+        return ""
+    end
+
+    local okContent, contentText = pcall(function()
+        return instance.ContentText
+    end)
+    if okContent and contentText and tostring(contentText) ~= "" then
+        return trimText(contentText)
+    end
+
+    local okText, text = pcall(function()
+        return instance.Text
+    end)
+    if okText and text then
+        return trimText(text)
+    end
+
+    return ""
+end
+
+local function safeFullName(instance)
+    local ok, fullName = pcall(function()
+        return instance:GetFullName()
+    end)
+    if ok then
+        return fullName
+    end
+    return instance and instance.Name or "(nil)"
+end
+
+local function isVisible(instance)
+    if not instance or not instance:IsA("GuiObject") then
+        return true
+    end
+    local ok, visible = pcall(function()
+        return instance.Visible
+    end)
+    return not ok or visible
+end
+
+local function isTextNode(instance)
+    return instance:IsA("TextLabel") or instance:IsA("TextButton") or instance:IsA("TextBox")
+end
+
+local function looksLikeRate(text)
+    return trimText(text):match("^%$[%d%.,]+[KMBTQ]?/s$") ~= nil
+end
+
+local function looksLikeRarity(text)
+    local rarity = {
+        common = true,
+        rare = true,
+        epic = true,
+        legendary = true,
+        mythic = true,
+        divine = true,
+        secret = true,
+        exclusive = true,
+    }
+    return rarity[normalizeText(text)] == true
+end
+
+local function looksLikePetName(text)
+    local cleaned = trimText(text)
+    if cleaned == "" then
+        return false
+    end
+
+    local lowered = normalizeText(cleaned)
+    if lowered == normalizeText(player.Name) or lowered == normalizeText(player.DisplayName) then
+        return false
+    end
+
+    local blockedExact = {
+        ["inventory"] = true,
+        ["brainrots"] = true,
+        ["all items"] = true,
+        ["lucky blocks"] = true,
+        ["search"] = true,
+        ["favorite"] = true,
+        ["equip"] = true,
+        ["unequip"] = true,
+        ["delete"] = true,
+        ["sell"] = true,
+        ["close"] = true,
+        ["backpack"] = true,
+        ["none"] = true,
+        ["selected"] = true,
+        ["new"] = true,
+        ["free"] = true,
+        ["best"] = true,
+        ["regular"] = true,
+        ["event"] = true,
+        ["ok"] = true,
+        ["yes"] = true,
+        ["no"] = true,
+    }
+    if blockedExact[lowered] then
+        return false
+    end
+
+    if looksLikeRate(cleaned) or looksLikeRarity(cleaned) then
+        return false
+    end
+    if cleaned:match("^%$") or cleaned:match("^x%d") or cleaned:match("^%d") then
+        return false
+    end
+    if lowered:find("power", 1, true) or lowered:find("speed", 1, true) or lowered:find("rebirth", 1, true) then
+        return false
+    end
+    if not cleaned:match("%a") then
+        return false
+    end
+
+    return true
+end
+
+local function addUnique(list, seen, value)
+    local cleaned = trimText(value)
+    if cleaned == "" or seen[cleaned] then
+        return
+    end
+    seen[cleaned] = true
+    list[#list + 1] = cleaned
+end
+
+local function tryClick(button)
+    if not button then
+        return false
+    end
+
+    local clicked = false
+
+    if firesignal then
+        pcall(function()
+            if button.MouseButton1Click then
+                firesignal(button.MouseButton1Click)
+                clicked = true
+            end
+        end)
+        if not clicked then
+            pcall(function()
+                if button.Activated then
+                    firesignal(button.Activated)
+                    clicked = true
+                end
+            end)
+        end
+    end
+
+    if not clicked then
+        pcall(function()
+            if button.Activate then
+                button:Activate()
+                clicked = true
+            end
+        end)
+    end
+
+    return clicked
+end
+
+local function formatAttributes(instance)
+    if not instance or not instance.GetAttributes then
+        return "(none)"
+    end
+
+    local ok, attributes = pcall(function()
+        return instance:GetAttributes()
+    end)
+    if not ok or type(attributes) ~= "table" then
+        return "(none)"
+    end
+
+    local parts = {}
+    for key, value in pairs(attributes) do
+        parts[#parts + 1] = tostring(key) .. "=" .. tostring(value)
+    end
+    table.sort(parts)
+
+    if #parts == 0 then
+        return "(none)"
+    end
+
+    return table.concat(parts, " | ")
+end
+
+local function collectDetailTexts(inventoryFrame, slotsRoot, itemsRoot)
+    local texts, seen = {}, {}
+    if not inventoryFrame then
+        return texts
+    end
+
+    for _, descendant in ipairs(inventoryFrame:GetDescendants()) do
+        if isTextNode(descendant) and isVisible(descendant) then
+            local isInSlots = slotsRoot and descendant:IsDescendantOf(slotsRoot)
+            local isInItems = itemsRoot and descendant:IsDescendantOf(itemsRoot)
+            if not isInSlots and not isInItems then
+                local text = readGuiText(descendant)
+                if text ~= "" then
+                    addUnique(texts, seen, text)
+                end
+            end
+        end
+    end
+
+    return texts
+end
+
+local function parseDetailTexts(texts)
+    local result = {
+        name = "",
+        rate = "",
+        rarity = "",
+        raw = texts,
+    }
+
+    for _, text in ipairs(texts) do
+        if result.rate == "" and looksLikeRate(text) then
+            result.rate = text
+        elseif result.rarity == "" and looksLikeRarity(text) then
+            result.rarity = text
+        elseif result.name == "" and looksLikePetName(text) then
+            result.name = text
+        end
+    end
+
+    return result
+end
+
+local function collectVisibleTexts(root)
+    local texts, seen = {}, {}
+    if not root then
+        return texts
+    end
+
+    for _, descendant in ipairs(root:GetDescendants()) do
+        if isTextNode(descendant) and isVisible(descendant) then
+            local text = readGuiText(descendant)
+            if text ~= "" then
+                addUnique(texts, seen, text)
+            end
+        end
+    end
+
+    return texts
+end
+
+local function collectInterestingDescendants(root)
+    local lines = {}
+    if not root then
+        return lines
+    end
+
+    for _, descendant in ipairs(root:GetDescendants()) do
+        local text = readGuiText(descendant)
+        local include = false
+        local details = {}
+
+        if text ~= "" then
+            include = true
+            details[#details + 1] = "text=" .. text
+        end
+
+        if descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") then
+            local ok, image = pcall(function()
+                return descendant.Image
+            end)
+            if ok and trimText(image) ~= "" then
+                include = true
+                details[#details + 1] = "image=" .. trimText(image)
+            end
+        end
+
+        local attributeText = formatAttributes(descendant)
+        if attributeText ~= "(none)" then
+            include = true
+            details[#details + 1] = "attributes=" .. attributeText
+        end
+
+        if descendant:IsA("ValueBase") then
+            local ok, value = pcall(function()
+                return descendant.Value
+            end)
+            if ok then
+                include = true
+                details[#details + 1] = "value=" .. tostring(value)
+            end
+        end
+
+        if include then
+            lines[#lines + 1] = safeFullName(descendant) .. " | " .. table.concat(details, " | ")
+        end
+    end
+
+    table.sort(lines)
+    return lines
+end
+
+local function getSlotImage(slotButton)
+    local imageNode = slotButton and slotButton:FindFirstChild("Image")
+    if not imageNode then
+        return ""
+    end
+
+    local ok, image = pcall(function()
+        return imageNode.Image
+    end)
+    if ok and image then
+        return trimText(image)
+    end
+
+    return ""
+end
+
+task.wait(2)
+
+local playerGui = player:FindFirstChildOfClass("PlayerGui")
+local newInventory = playerGui and playerGui:FindFirstChild("NewInventory")
+local inventoryFrame = newInventory and newInventory:FindFirstChild("InventoryFrame")
+local slotsRoot = inventoryFrame and inventoryFrame:FindFirstChild("Slots")
+local backpackRoot = inventoryFrame and inventoryFrame:FindFirstChild("Backpack")
+local itemsRoot = backpackRoot and backpackRoot:FindFirstChild("Items")
+
+local slotEntries = {}
+if slotsRoot then
+    for _, slot in ipairs(slotsRoot:GetChildren()) do
+        if slot:IsA("GuiObject") then
+            local button = slot:FindFirstChild("Button")
+            if button and button:IsA("GuiButton") and isVisible(slot) and isVisible(button) then
+                local slotNumText = readGuiText(button:FindFirstChild("SlotNum"))
+                local countText = readGuiText(button:FindFirstChild("Count"))
+                local favoriteVisible = false
+                local favoriteNode = button:FindFirstChild("Favorite")
+                if favoriteNode and favoriteNode:IsA("GuiObject") then
+                    favoriteVisible = isVisible(favoriteNode)
+                end
+
+                slotEntries[#slotEntries + 1] = {
+                    slotName = slot.Name,
+                    slotNum = slotNumText,
+                    count = countText,
+                    image = getSlotImage(button),
+                    favorite = favoriteVisible,
+                    slotAttributes = formatAttributes(slot),
+                    buttonAttributes = formatAttributes(button),
+                    imageAttributes = formatAttributes(button:FindFirstChild("Image")),
+                    button = button,
+                    slot = slot,
+                }
+            end
+        end
+    end
+end
+
+table.sort(slotEntries, function(a, b)
+    local aNum = tonumber((a.slotName or ""):match("%d+")) or math.huge
+    local bNum = tonumber((b.slotName or ""):match("%d+")) or math.huge
+    return aNum < bNum
+end)
+
+local lines = {
+    "DawnTrack Inventory Pet Debug",
+    "player=" .. tostring(player.Name),
+    "inventory=" .. (inventoryFrame and safeFullName(inventoryFrame) or "(not found)"),
+    "slots_root=" .. (slotsRoot and safeFullName(slotsRoot) or "(not found)"),
+    "items_root=" .. (itemsRoot and safeFullName(itemsRoot) or "(not found)"),
+    "total_slots=" .. tostring(#slotEntries),
+    "",
+}
+
+for _, entry in ipairs(slotEntries) do
+    local clicked = tryClick(entry.button)
+    task.wait(clicked and 0.2 or 0.05)
+
+    local detailTexts = collectDetailTexts(inventoryFrame, slotsRoot, itemsRoot)
+    local parsed = parseDetailTexts(detailTexts)
+    local itemTexts = collectVisibleTexts(itemsRoot)
+    local slotDump = collectInterestingDescendants(entry.slot)
+    local itemsDump = collectInterestingDescendants(itemsRoot)
+
+    lines[#lines + 1] = string.format("[%s] slot_num=%s", entry.slotName, entry.slotNum ~= "" and entry.slotNum or "(none)")
+    lines[#lines + 1] = "count=" .. (entry.count ~= "" and entry.count or "(none)")
+    lines[#lines + 1] = "favorite=" .. tostring(entry.favorite)
+    lines[#lines + 1] = "image=" .. (entry.image ~= "" and entry.image or "(none)")
+    lines[#lines + 1] = "slot_attributes=" .. entry.slotAttributes
+    lines[#lines + 1] = "button_attributes=" .. entry.buttonAttributes
+    lines[#lines + 1] = "image_attributes=" .. entry.imageAttributes
+    lines[#lines + 1] = "clicked=" .. tostring(clicked)
+    lines[#lines + 1] = "name=" .. (parsed.name ~= "" and parsed.name or "(none)")
+    lines[#lines + 1] = "rate=" .. (parsed.rate ~= "" and parsed.rate or "(none)")
+    lines[#lines + 1] = "rarity=" .. (parsed.rarity ~= "" and parsed.rarity or "(none)")
+    lines[#lines + 1] = "detail_texts=" .. (#parsed.raw > 0 and table.concat(parsed.raw, " | ") or "(none)")
+    lines[#lines + 1] = "items_texts=" .. (#itemTexts > 0 and table.concat(itemTexts, " | ") or "(none)")
+    lines[#lines + 1] = "slot_dump=" .. (#slotDump > 0 and table.concat(slotDump, " || ") or "(none)")
+    lines[#lines + 1] = "items_dump=" .. (#itemsDump > 0 and table.concat(itemsDump, " || ") or "(none)")
+    lines[#lines + 1] = "button=" .. safeFullName(entry.button)
+    lines[#lines + 1] = ""
+end
+
+if #slotEntries == 0 then
+    lines[#lines + 1] = "No NewInventory slots found."
+end
+
+local output = table.concat(lines, "\n")
+if setclipboard then
+    setclipboard(output)
+elseif toclipboard then
+    toclipboard(output)
+end
+
+print(output)
